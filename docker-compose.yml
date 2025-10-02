@@ -1,0 +1,179 @@
+name: ${COMPOSE_PROJECT_NAME:-app-alpine}
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: app-alpine-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - /opt/stack-aia/postgres/data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  db_init:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: app-alpine-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command: >
+      sh -lc "
+      psql -h postgres -U ${POSTGRES_USER} -d postgres
+      -tc \"SELECT 1 FROM pg_database WHERE datname='evolution'\" | grep -q 1
+      || psql -h postgres -U ${POSTGRES_USER} -d postgres -c 'CREATE DATABASE evolution;';
+      psql -h postgres -U ${POSTGRES_USER} -d postgres
+      -tc \"SELECT 1 FROM pg_database WHERE datname='n8n'\" | grep -q 1
+      || psql -h postgres -U ${POSTGRES_USER} -d postgres -c 'CREATE DATABASE n8n';"
+    restart: "no"
+
+  redis:
+    image: redis:${REDIS_VERSION}
+    container_name: app-alpine-redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    environment:
+      TZ: ${TZ}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - /opt/stack-aia/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "PING"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+    container_name: app-alpine-n8n
+    user: "1000:1000"
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      TZ: ${TZ}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      EXECUTIONS_MODE: ${EXECUTIONS_MODE:-queue}
+      N8N_RUNNERS_ENABLED: ${N8N_RUNNERS_ENABLED}
+      OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: ${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: ${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
+      N8N_DIAGNOSTICS_ENABLED: ${N8N_DIAGNOSTICS_ENABLED}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE}
+      N8N_WORKER_CONCURRENCY: ${N8N_WORKER_CONCURRENCY}
+      N8N_COMMUNITY_PACKAGES_ENABLED: ${N8N_COMMUNITY_PACKAGES_ENABLED}
+      DB_TYPE: ${DB_TYPE}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+      N8N_DB_NAME: ${N8N_DB_NAME}
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - /opt/stack-aia/n8n:/home/node/.n8n
+      - /opt/stack-aia/_wf:/home/node/_wf
+      - /opt/stack-aia/_cred:/home/node/_cred
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db_init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    restart: unless-stopped
+
+  worker:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+    container_name: app-alpine-n8n-worker
+    user: "1000:1000"
+    command: ["n8n", "worker"]
+    environment:
+      TZ: ${TZ}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      EXECUTIONS_MODE: ${EXECUTIONS_MODE:-queue}
+      DB_TYPE: ${DB_TYPE}
+      DB_POSTGRESDB_HOST: ${DB_POSTGRESDB_HOST}
+      DB_POSTGRESDB_PORT: ${DB_POSTGRESDB_PORT}
+      DB_POSTGRESDB_DATABASE: ${DB_POSTGRESDB_DATABASE}
+      DB_POSTGRESDB_USER: ${DB_POSTGRESDB_USER}
+      DB_POSTGRESDB_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+    depends_on:
+      n8n:
+        condition: service_started
+    restart: unless-stopped
+
+  flowise:
+    image: flowiseai/flowise:${FLOWISE_VERSION}
+    container_name: app-alpine-flowise
+    environment:
+      TZ: ${TZ}
+      PORT: 3000
+      DATABASE_PATH: ${FLOWISE_DATABASE_PATH}
+      FLOWISE_USERNAME: ${FLOWISE_USERNAME:-}
+      FLOWISE_PASSWORD: ${FLOWISE_PASSWORD:-}
+    ports:
+      - "${FLOWISE_PORT:-3030}:3000"
+    volumes:
+      - /opt/stack-aia/flowise:${FLOWISE_DATABASE_PATH}
+    restart: unless-stopped
+
+  evolution:
+    image: ${EVO_IMAGE}
+    container_name: app-alpine-evolution
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db_init:
+        condition: service_completed_successfully
+    environment:
+      TZ: ${TZ}
+      SERVER_URL: http://0.0.0.0:${EVOLUTION_PORT}
+      CACHE_REDIS_ENABLED: "false"
+      EVO_AUTH_KEY: ${EVO_AUTH_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/evolution
+    ports:
+      - "${EVOLUTION_PORT:-8080}:8080"
+    volumes:
+      - /opt/stack-aia/evolution:/app/storage
+    restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:3
+    container_name: app-alpine-ngrok
+    command: ["http", "--log=stdout", "${NGROK_PORT:-5678}", "--domain", "${NGROK_DOMAIN}"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    depends_on:
+      - n8n
+    restart: unless-stopped
+
+networks:
+  default:
+    name: app-alpine-net
